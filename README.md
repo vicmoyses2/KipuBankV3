@@ -4,7 +4,7 @@
 
 Users can safely deposit and withdraw cryptocurrencies, and the bank enforces strong security and economic constraints such as a **global USD capacity** and a **maximum withdrawal limit per transaction**.
 
-Developed collaboratively by **Victor Moyses Nascimento** and **Bruno Pancotto** as part of the **ETH-KIPU blockchain learning program**.
+Developed collaboratively by **[Victor Moyses Nascimento](https://github.com/victormoyses)** and **[Bruno Pancotto](https://github.com/pancotto)** as part of the **ETH-KIPU blockchain learning program**.
 
 ---
 
