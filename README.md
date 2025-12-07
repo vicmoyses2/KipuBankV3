@@ -1,193 +1,224 @@
-# 🏦 KipuBankV2 — Multi-Currency On-Chain Bank
+# 🏦 KipuBankV3 --- Multi-Currency On-Chain Bank
 
-**KipuBankV2** is an upgraded decentralized banking smart contract supporting **multi-asset deposits (ETH, BTC-ERC20, USDC-ERC20)** while internally accounting all balances in **USD (18 decimals)** using **Chainlink price feeds**.
+**KipuBankV3** is an upgraded decentralized banking smart contract
+supporting **multi-asset deposits (ETH, BTC-ERC20, USDC-ERC20)** while
+internally accounting all balances in **USD (18 decimals)** using
+**Chainlink price feeds**.
 
-Users can safely deposit and withdraw cryptocurrencies, and the bank enforces strong security and economic constraints such as a **global USD capacity** and a **maximum withdrawal limit per transaction**.
+Users can safely deposit and withdraw cryptocurrencies, and the bank
+enforces strict economic and security constraints such as:
 
-Developed collaboratively by **[Victor Moyses Nascimento](https://github.com/victormoyses)** and **[Bruno Pancotto](https://github.com/pancotto)** as part of the **ETH-KIPU blockchain learning program**.
+-   **Global USD capacity limit**
+-   **Per-transaction withdrawal limit**
+-   **USDC divisibility rules (must be divisible by 1e12)**
+-   **ReentrancyGuard protection**
+-   **Direct ETH transfer rejection**
 
----
+Developed collaboratively by **[Victor Moyses
+Nascimento](https://github.com/victormoyses)** and **[Bruno
+Pancotto](https://github.com/pancotto)** as part of the **ETH‑KIPU
+blockchain learning program**.
+
+------------------------------------------------------------------------
 
 ## 📘 Overview
 
-KipuBankV2 allows users to:
+KipuBankV3 allows users to:
 
-- Deposit assets:
-  - **ETH** (native)
-  - **BTC** (ERC20, 18 decimals)
-  - **USDC** (ERC20, 6 decimals)
+### Deposit assets:
 
-- Withdraw assets back in:
-  - ETH  
-  - BTC  
-  - USDC  
+-   **ETH** (native)
+-   **BTC** (ERC20, 18 decimals)
+-   **USDC** (ERC20, 6 decimals)
 
-- Track balances internally in **USD (18 decimals)** using:
-  - **ETH/USD Chainlink Aggregator**
-  - **BTC/USD Chainlink Aggregator**
+### Withdraw assets:
 
-### 🔐 Key Features
+-   ETH\
+-   BTC\
+-   USDC
 
-- **Global bank USD capacity** (`i_bankCapacityUsd`)
-- **Max withdrawal per transaction** (`i_maxWithdrawPerTxUsd`)
-- **ReentrancyGuard** protection for all transfers
-- **USD-normalized accounting for all users**
-- **Events** for deposits and withdrawals
-- **Rejection of direct ETH transfers** (via `receive` and `fallback`)
-- **Immutable feed/token addresses** (no admin privileges)
+### Internal accounting:
 
----
+-   All users' balances are normalized to **USD (18 decimals)**
+-   Using:
+    -   **ETH/USD Chainlink Aggregator**
+    -   **BTC/USD Chainlink Aggregator**
+-   All non‑USDC deposits are swapped to **USDC**, the canonical reserve
+    asset.
 
-## 🌐 Verified Contract — Sepolia Testnet
+------------------------------------------------------------------------
+
+## 🏛️ Formal Banking Rules (Protocol-Level Invariants)
+
+### 1️⃣ **Global Bank Capacity (i_bankCapacityUsd)**
+
+-   Maximum total USD (18 decimals) that the bank can hold.\
+-   Any deposit that would exceed this cap **reverts with
+    `ExceedsBankCapacity()`**.\
+-   Ensures the bank cannot become under-collateralized.
+
+### 2️⃣ **Maximum Withdrawal Per Transaction (i_maxWithdrawPerTxUsd)**
+
+-   A user cannot withdraw more than this USD amount in a single call.\
+-   Exceeding this limit **reverts with `InvalidMaxWithdrawAmount()`**.\
+-   Prevents large single‑shot liquidity drains.
+
+### 3️⃣ **USDC Divisibility Rule**
+
+All internal accounting uses USD with **18 decimals**, while USDC has
+**6 decimals**.\
+Therefore:
+
+    amountUsd % 1e12 == 0
+
+If not divisible, the withdrawal **reverts with `InvalidUsdcAmount()`**.
+
+This enforces: - Precise conversion between USDC and USD\
+- No fractional USDC issues on withdrawal
+
+### 4️⃣ **Only Canonical USDC Reserves**
+
+-   ETH and BTC deposits **are immediately swapped into USDC** using the
+    configured router.\
+-   Users' internal balances are stored in:
+    -   Canonical **USDC** (6 decimals)
+    -   Consolidated **USD** (18 decimals)
+
+### 5️⃣ **Reentrancy Protection**
+
+All deposit/withdraw flows use `nonReentrant`.\
+Reentrancy attempts always **revert**.
+
+### 6️⃣ **Direct ETH Transfers Blocked**
+
+-   `receive()` and `fallback()` both revert with
+    `InvalidDepositPath()`.\
+-   Users **must** call `depositWithEth()`.
+
+------------------------------------------------------------------------
+
+## 🌐 Verified Contract --- Sepolia Testnet
 
 > ⚡ **Live deployed & verified on Etherscan**
 
-**Contract Address:**  
-[`0x3417d87bB325f82B88aFf6E2A40F584983A4b10F`](https://sepolia.etherscan.io/address/0x3417d87bb325f82b88aff6e2a40f584983a4b10f)
+**Contract Address:**\
+[`0x034B69b8d6661C4Ad970FA698e4e25296D8f5f20`](https://sepolia.etherscan.io/address/0x034b69b8d6661c4ad970fa698e4e25296d8f5f20)
 
-Interact through Etherscan:
-- Read state (balances, counters)
-- Deposit/withdraw
-- Inspect verified source code
+Interact through Etherscan: - Read state (balances, counters) -
+Deposit/withdraw - Inspect verified source code
 
----
+------------------------------------------------------------------------
 
 ## 🏗️ Architecture Summary
 
-### Internal Storage Model
+### Storage Model
 
-Balances tracked in two layers:
-
-1. **Raw token balances** (native units)
-   - ETH → wei  
-   - BTC → 18-decimals ERC20  
-   - USDC → 6-decimals ERC20  
-
-2. **Consolidated USD balance** (18 decimals)
-   - Enforces user limits  
-   - Enforces global bank capacity  
+1.  **Raw token balances**
+    -   ETH → wei\
+    -   BTC → 18-decimals ERC20\
+    -   USDC → 6-decimals
+2.  **Consolidated USD balance (18 decimals)**
+    -   Enforces per‑user and system‑wide limits\
+    -   Updated after every deposit/withdrawal
 
 ### Price Conversion
 
-- ETH/USD and BTC/USD use Chainlink price feeds  
-- USDC → `amountUsdc * 1e12` to convert to 18 decimals
+-   Chainlink ETH/USD\
 
----
+-   Chainlink BTC/USD\
 
-## ⚙️ Deployment Instructions
+-   USDC mapped via:
 
-### 🧩 Using Remix
+        amountUsd = amountUsdc * 1e12
 
-1. Open https://remix.ethereum.org  
-2. Paste contract into `KipuBankV2.sol`  
-3. Compile with Solidity `0.8.24`  
-4. Deploy with parameters:  
-   - `bankCapacityUsd` (e.g., `1_000_000e18`)  
-   - `maxWithdrawPerTxUsd` (e.g., `10_000e18`)  
-   - Chainlink feed addresses  
-   - BTC & USDC ERC20 token addresses  
+------------------------------------------------------------------------
 
----
+## 🌐 Sepolia Deployment (Foundry)
 
-## 🌐 Sepolia Testnet Deployment (Foundry)
+### Chainlink Feeds
 
-### Chainlink Price Feeds
-
-| Asset   | Address                                      |
-| ------- | -------------------------------------------- |
-| BTC/USD | `0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43` |
-| ETH/USD | `0x694AA1769357215DE4FAC081bf1f309aDC325306` |
+  Asset     Address
+  --------- ----------------------------------------------
+  BTC/USD   `0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43`
+  ETH/USD   `0x694AA1769357215DE4FAC081bf1f309aDC325306`
 
 ### ERC20 Tokens
 
-| Token | Address                                      |
-| ----- | -------------------------------------------- |
-| BTC   | `0x35f131cF4b53038192117f640e161807dBcB0fdF` |
-| USDC  | `0xf08a50178dfcde18524640ea6618a1f965821715` |
+  Token   Address
+  ------- ----------------------------------------------
+  BTC     `0x35f131cF4b53038192117f640e161807dBcB0fdF`
+  USDC    `0x5dEaC602762362FE5f135FA5904351916053cF70`
 
-### Foundry Deployment
+### Deploy
 
-```bash
+``` bash
 export SEPOLIA_RPC_URL="https://sepolia.infura.io/v3/<API_KEY>"
 export PRIVATE_KEY="<your_wallet_private_key>"
+export UNISWAP_V4_ROUTER="<router_address>"
 export ETHERSCAN_API_KEY="<your_etherscan_key>"
 
-forge script script/DeployKipuBankV2Sepolia.s.sol:DeployKipuBankV2   --rpc-url $SEPOLIA_RPC_URL   --private-key $PRIVATE_KEY   --broadcast   --verify   -vvvv
+forge script script/DeployKipuBankV3Sepolia.s.sol:DeployKipuBankV3 \
+  --rpc-url $SEPOLIA_RPC_URL \
+  --private-key $PRIVATE_KEY \
+  --broadcast \
+  --verify \
+  -vvvv
 ```
 
----
+------------------------------------------------------------------------
 
 ## 🧪 Testing (Foundry)
 
-Run the complete test suite:
-
-```bash
+``` bash
 forge test -vvvv
 ```
 
-Includes tests for:
-- Deposits/withdrawals (ETH, BTC, USDC)
-- ReentrancyAttack prevention
-- Zero-amount validation
-- Non-existing user withdrawals
-- Bank capacity enforcement
-- Per-tx withdrawal limits
-- USDC divisibility (`InvalidUsdcAmount`)
-- Reverts on `receive()` and `fallback()`
-- Multi-user deposit accounting
+Tests cover: - All deposit/withdraw flows\
+- ETH/BTC/USDC conversion\
+- Bank capacity rules\
+- Per‑tx withdrawal rules\
+- Reentrancy attack simulation\
+- Invalid USDC divisibility\
+- Direct ETH transfer rejection
 
----
+------------------------------------------------------------------------
 
-## 💬 Interaction Guide
+## 📊 Interaction (cast)
 
-### 1. Deposit ETH
-```bash
-cast send $CONTRACT "depositWithEth()" --value 1ether --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
+### Deposit ETH
+
+``` bash
+cast send $CONTRACT "depositWithEth()" \
+  --value 1ether \
+  --rpc-url $SEPOLIA_RPC_URL \
+  --private-key $PRIVATE_KEY
 ```
 
-### 2. Deposit BTC
-```bash
-cast send $BTC "approve(address,uint256)" $CONTRACT 1000000000000000000 --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
-cast send $CONTRACT "depositWithBtc(uint256)" 1000000000000000000 --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
+### Deposit BTC (ERC20)
+
+``` bash
+cast send $BTC "approve(address,uint256)" $CONTRACT 1e18
+cast send $CONTRACT "depositWithBtc(uint256)" 1e18
 ```
 
-### 3. Deposit USDC
-Approve then deposit.
+### Withdraw
 
-### 4. Withdraw (any asset)
-```solidity
-withdrawWithEth(uint256 amountUsd)
-withdrawWithBtc(uint256 amountUsd)
-withdrawWithUsdc(uint256 amountUsd)
-```
+    withdrawWithEth(uint256 amountUsd)
+    withdrawWithBtc(uint256 amountUsd)
+    withdrawWithUsdc(uint256 amountUsd)
 
----
+------------------------------------------------------------------------
 
-## 📊 Reading State
+## 🛡️ Security Model
 
-```bash
-cast call $CONTRACT "getUserBalanceUsd(address)" $ME
-cast call $CONTRACT "getUserTokenBalances(address)" $ME
-cast call $CONTRACT "getContractBalanceUsd()"
-```
+-   No owner, no admin keys\
+-   Immutable protocol parameters\
+-   Full reentrancy protection\
+-   Strict validation on every operation
 
----
-
-## 🛡️ Security Considerations
-
-- ReentrancyGuard on all flows  
-- No owner / no admin roles  
-- Direct ETH transfers rejected  
-- Strong validation:  
-  - `InvalidAmount`  
-  - `ExceedsBankCapacity`  
-  - `InvalidMaxWithdrawAmount`  
-  - `InvalidUsdcAmount`  
-  - `InsufficientBalance`  
-
----
+------------------------------------------------------------------------
 
 ## 🧾 License
 
-MIT License © 2025  
-Part of the **ETH-KIPU** blockchain learning project.
+MIT License © 2025\
+Part of the **ETH-KIPU** blockchain learning program.

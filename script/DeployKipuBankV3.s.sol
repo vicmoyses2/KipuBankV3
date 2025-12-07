@@ -2,11 +2,11 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {KipuBankV2} from "../src/KipuBankV2.sol";
+import {KipuBankV3} from "../src/KipuBankV3.sol";
 
 /**
- * @title DeployKipuBankV2
- * @notice Foundry script responsible for deploying the KipuBankV2 contract.
+ * @title DeployKipuBankV3
+ * @notice Foundry script responsible for deploying the KipuBankV3 contract.
  * @dev
  * Relies on environment variables for configuration:
  *  - PRIVATE_KEY: Deployer's private key
@@ -14,15 +14,16 @@ import {KipuBankV2} from "../src/KipuBankV2.sol";
  *  - BTC_USD_FEED: Address of the Chainlink BTC/USD price feed
  *  - BTC_TOKEN: Address of the BTC ERC20 token
  *  - USDC_TOKEN: Address of the USDC ERC20 token
+ *  - UNISWAP_V4_ROUTER: Address of the Uniswap V4 router          // << NEW
  *  - BANK_CAPACITY_USD (optional, default: 1_000_000e18)
  *  - MAX_WITHDRAW_PER_TX_USD (optional, default: 10_000e18)
  */
-contract DeployKipuBankV2 is Script {
+contract DeployKipuBankV3 is Script {
     /**
      * @notice Runs the deployment script.
      * @dev The script:
      *  - Reads configuration from environment variables.
-     *  - Broadcasts a transaction that deploys KipuBankV2.
+     *  - Broadcasts a transaction that deploys KipuBankV3.
      *  - Logs the deployed contract address.
      */
     function run() external {
@@ -32,6 +33,10 @@ contract DeployKipuBankV2 is Script {
         address btcUsdFeed = vm.envAddress("BTC_USD_FEED");
         address btcToken = vm.envAddress("BTC_TOKEN");
         address usdcToken = vm.envAddress("USDC_TOKEN");
+
+        // -------- NEW: read Uniswap V4 router address from env --------
+        address uniswapV4Router = vm.envAddress("UNISWAP_V4_ROUTER"); // << NEW
+        // ----------------------------------------------------------------
 
         uint256 bankCapacityUsd = vm.envOr(
             "BANK_CAPACITY_USD",
@@ -44,17 +49,20 @@ contract DeployKipuBankV2 is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        KipuBankV2 kipuBank = new KipuBankV2(
+        // ----------------- CHANGED: added uniswapV4Router -----------------
+        KipuBankV3 kipuBank = new KipuBankV3(
             bankCapacityUsd,
             maxWithdrawPerTxUsd,
             ethUsdFeed,
             btcUsdFeed,
             btcToken,
-            usdcToken
+            usdcToken,
+            uniswapV4Router // << NEW 7th argument
         );
+        // ------------------------------------------------------------------
 
         vm.stopBroadcast();
 
-        console2.log("KipuBankV2 deployed at:", address(kipuBank));
+        console2.log("KipuBankV3 deployed at:", address(kipuBank));
     }
 }
