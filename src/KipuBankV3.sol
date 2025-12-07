@@ -4,21 +4,52 @@ pragma solidity ^0.8.24;
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import {PriceConverter} from "./PriceConverter.sol";
+
+// >>> NEW: Minimal Uniswap V4 router interface used for token-to-USDC swaps.
+/**
+ * @dev This is a simplified interface for an external Uniswap V4-style router
+ *      that executes single-pool swaps. The concrete implementation and
+ *      routing details are expected to be provided by deployment configuration.
+ *
+ *      IMPORTANT: This interface is intentionally generic and does not reflect
+ *      all Uniswap V4 features. It is designed for educational purposes and
+ *      should be adapted to the actual deployed router on the target network.
+ */
+interface IUniswapV4Router {
+    /**
+     * @notice Swaps an exact amount of tokenIn for tokenOut via a single path.
+     * @param tokenIn Address of the input token (use address(0) to represent native ETH).
+     * @param tokenOut Address of the output token (USDC or other).
+     * @param amountIn Exact amount of tokenIn to be swapped.
+     * @param amountOutMinimum Minimum acceptable amount of tokenOut (slippage control).
+     * @param recipient Address that will receive tokenOut.
+     * @return amountOut The actual amount of tokenOut received.
+     */
+    function swapExactInputSingle(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOutMinimum,
+        address recipient
+    ) external payable returns (uint256 amountOut);
+}
 
 /**
- * @title KipuBankV2
+ * @title KipuBankV3
  * @notice A multi-currency on-chain bank that supports deposits and withdrawals
  *         in ETH (native), BTC (ERC20, 18 decimals) and USDC (ERC20, 6 decimals),
  *         while internally tracking balances in USD with 18 decimals of precision.
  * @dev
- * - Relies on Chainlink price feeds for ETH/USD and BTC/USD conversions.
+ * - In this version, USDC is treated as the canonical asset held by the bank.
+ * - Any deposit in a non-USDC asset (e.g. ETH or BTC) is immediately swapped
+ *   to USDC via an external Uniswap V4 router and then credited to the user.
+ * - The global bank capacity (in USD) is enforced using the actual USDC
+ *   amount obtained from the swap, so the bank never exceeds its limit.
+ * - Withdrawals may still be requested in ETH, BTC or USDC. For ETH/BTC,
+ *   USDC is swapped back via Uniswap V4 and delivered to the user.
  * - USDC is treated as a soft-pegged 1:1 representation of USD.
- * - Internal accounting for USD uses 18 decimals.
  */
-contract KipuBankV2 is ReentrancyGuard {
-    using PriceConverter for uint256;
-
+contract KipuBankV3 is ReentrancyGuard {
     // -------------------------------------------------------------------------
     // Immutable System Configuration
     // -------------------------------------------------------------------------
@@ -29,20 +60,10 @@ contract KipuBankV2 is ReentrancyGuard {
     /// @notice Maximum withdrawal amount per transaction in USD (18 decimals).
     uint256 public immutable i_maxWithdrawPerTxUsd;
 
-    // -------------------------------------------------------------------------
-    // State: Global Counters & Price Feeds
-    // -------------------------------------------------------------------------
-
-    /// @notice Total number of successful deposits across all users.
-    uint256 public depositCount;
-
-    /// @notice Total number of successful withdrawals across all users.
-    uint256 public withdrawCount;
-
-    /// @notice Chainlink price feed for ETH/USD pair.
+    /// @notice Chainlink price feed for ETH/USD pair (kept for external consumers / analytics).
     AggregatorV3Interface public immutable ethUsdPriceFeed;
 
-    /// @notice Chainlink price feed for BTC/USD pair.
+    /// @notice Chainlink price feed for BTC/USD pair (kept for external consumers / analytics).
     AggregatorV3Interface public immutable btcUsdPriceFeed;
 
     /// @notice ERC20 token used to represent BTC.
@@ -51,6 +72,21 @@ contract KipuBankV2 is ReentrancyGuard {
     /// @notice ERC20 token representing USDC (expected 6 decimals).
     IERC20 public immutable usdcToken;
 
+    /// @notice External router used to perform swaps via Uniswap V4.
+    /// @dev This router is responsible for ETH/BTC <-> USDC conversions.
+    // >>> NEW: Uniswap V4 router reference
+    IUniswapV4Router public immutable uniswapRouter;
+
+    // -------------------------------------------------------------------------
+    // State: Global Counters
+    // -------------------------------------------------------------------------
+
+    /// @notice Total number of successful deposits across all users.
+    uint256 public depositCount;
+
+    /// @notice Total number of successful withdrawals across all users.
+    uint256 public withdrawCount;
+
     // -------------------------------------------------------------------------
     // State: User Balances
     // -------------------------------------------------------------------------
@@ -58,14 +94,17 @@ contract KipuBankV2 is ReentrancyGuard {
     /**
      * @notice Raw token balances for a user, stored in token-native units.
      * @dev
-     * - `eth` is denominated in wei (18 decimals).
-     * - `btc` is denominated in token units (assumed 18 decimals).
+     * - In this version, USDC is the canonical balance that is actually
+     *   stored by the bank after any necessary swaps.
      * - `usdc` is denominated in token units (assumed 6 decimals).
+     * - `eth` and `btc` fields are kept for backward compatibility and
+     *   potential future extensions, but the effective accounting is
+     *   done using USDC + USD (userBalanceUsd).
      */
     struct UserTokenBalances {
-        uint256 eth;
-        uint256 btc;
-        uint256 usdc;
+        uint256 eth; // Legacy / optional: may remain zero in this version.
+        uint256 btc; // Legacy / optional: may remain zero in this version.
+        uint256 usdc; // Canonical token held by the bank on behalf of the user.
     }
 
     /// @dev Mapping from user address to raw token balances.
@@ -163,21 +202,24 @@ contract KipuBankV2 is ReentrancyGuard {
     // -------------------------------------------------------------------------
 
     /**
-     * @notice Initializes the KipuBankV2 contract with its configuration.
+     * @notice Initializes the KipuBankV3 contract with its configuration.
      * @param bankCapacityUsd Maximum aggregate bank capacity, in USD (18 decimals).
      * @param maxWithdrawPerTxUsd Maximum allowed withdrawal per transaction, in USD.
      * @param ethUsdPriceFeed_ Chainlink ETH/USD price feed address.
      * @param btcUsdPriceFeed_ Chainlink BTC/USD price feed address.
      * @param btcToken_ ERC20 token address representing BTC.
      * @param usdcToken_ ERC20 token address representing USDC (6 decimals).
+     * @param uniswapRouter_ External Uniswap V4 router address used for swaps.
      */
+    // >>> UPDATED: constructor now receives the Uniswap router address.
     constructor(
         uint256 bankCapacityUsd,
         uint256 maxWithdrawPerTxUsd,
         address ethUsdPriceFeed_,
         address btcUsdPriceFeed_,
         address btcToken_,
-        address usdcToken_
+        address usdcToken_,
+        address uniswapRouter_
     ) {
         i_bankCapacityUsd = bankCapacityUsd;
         i_maxWithdrawPerTxUsd = maxWithdrawPerTxUsd;
@@ -185,6 +227,7 @@ contract KipuBankV2 is ReentrancyGuard {
         btcUsdPriceFeed = AggregatorV3Interface(btcUsdPriceFeed_);
         btcToken = IERC20(btcToken_);
         usdcToken = IERC20(usdcToken_);
+        uniswapRouter = IUniswapV4Router(uniswapRouter_);
     }
 
     // -------------------------------------------------------------------------
@@ -215,8 +258,8 @@ contract KipuBankV2 is ReentrancyGuard {
     /**
      * @notice Returns the raw token balances for a given user.
      * @param user The address of the user.
-     * @return ethBalance The user's ETH balance (in wei).
-     * @return btcBalance The user's BTC token balance (18 decimals).
+     * @return ethBalance The user's legacy ETH balance (may be zero in V3).
+     * @return btcBalance The user's legacy BTC balance (may be zero in V3).
      * @return usdcBalance The user's USDC token balance (6 decimals).
      */
     function getUserTokenBalances(
@@ -235,24 +278,35 @@ contract KipuBankV2 is ReentrancyGuard {
     // -------------------------------------------------------------------------
 
     /**
-     * @notice Deposits ETH into the bank, crediting the user in USD.
+     * @notice Deposits ETH into the bank, swapping it to USDC and crediting the user in USD.
      * @dev
      * - `msg.value` is interpreted as an ETH amount in wei (18 decimals).
-     * - The corresponding USD value is computed using the ETH/USD price feed.
+     * - ETH is immediately swapped to USDC via the Uniswap V4 router.
+     * - The actual USDC amount received is scaled to USD (18 decimals) by `* 1e12`.
+     * - The bank capacity is enforced based on the final USDC amount.
      */
+    // >>> UPDATED: ETH deposits now go through a Uniswap swap into USDC.
     function depositWithEth()
         external
         payable
         nonReentrant
         onlyPositiveAmount(msg.value)
     {
-        uint256 amountUsd = msg.value.getPriceFeedConversionRate(
-            ethUsdPriceFeed
+        // Swap native ETH to USDC via the router (no slippage protection here:
+        // for production systems, always pass a non-zero amountOutMinimum value).
+        uint256 usdcAmountOut = _swapExactInputSingleToUsdc(
+            address(0),
+            msg.value
         );
 
+        // Convert USDC (6 decimals) to USD value in 18 decimals.
+        uint256 amountUsd = usdcAmountOut * 1e12;
+
+        // Ensure the bank will not exceed its global capacity after this deposit.
         _checkBankCapacityUsdAfterDeposit(amountUsd);
 
-        _userTokenBalances[msg.sender].eth += msg.value;
+        // Canonical balance is held in USDC and represented in USD internally.
+        _userTokenBalances[msg.sender].usdc += usdcAmountOut;
         userBalanceUsd[msg.sender] += amountUsd;
         totalBankBalanceUsd += amountUsd;
 
@@ -261,25 +315,39 @@ contract KipuBankV2 is ReentrancyGuard {
     }
 
     /**
-     * @notice Deposits BTC (ERC20) into the bank, crediting the user in USD.
+     * @notice Deposits BTC (ERC20) into the bank, swapping it to USDC and crediting the user in USD.
      * @dev
      * - The BTC token is assumed to use 18 decimals.
      * - The caller must have approved this contract to spend `amountBtc`.
+     * - BTC is swapped to USDC via the Uniswap V4 router before balance updates.
      * @param amountBtc The amount of BTC tokens to deposit (18 decimals).
      */
+    // >>> UPDATED: BTC deposits now go through a Uniswap swap into USDC.
     function depositWithBtc(
         uint256 amountBtc
     ) external nonReentrant onlyPositiveAmount(amountBtc) {
-        bool ok = btcToken.transferFrom(msg.sender, address(this), amountBtc);
-        if (!ok) revert TransferFailed();
+        // Pull BTC from user into this contract.
+        bool okTransfer = btcToken.transferFrom(
+            msg.sender,
+            address(this),
+            amountBtc
+        );
+        if (!okTransfer) revert TransferFailed();
 
-        uint256 amountUsd = amountBtc.getPriceFeedConversionRate(
-            btcUsdPriceFeed
+        // Swap BTC -> USDC via router; bank holds the resulting USDC.
+        uint256 usdcAmountOut = _swapExactInputSingleToUsdc(
+            address(btcToken),
+            amountBtc
         );
 
+        // Compute USD value (18 decimals) based on USDC amount.
+        uint256 amountUsd = usdcAmountOut * 1e12;
+
+        // Enforce bank capacity using the real post-swap USDC amount.
         _checkBankCapacityUsdAfterDeposit(amountUsd);
 
-        _userTokenBalances[msg.sender].btc += amountBtc;
+        // Credit user in canonical USDC units and USD accounting.
+        _userTokenBalances[msg.sender].usdc += usdcAmountOut;
         userBalanceUsd[msg.sender] += amountUsd;
         totalBankBalanceUsd += amountUsd;
 
@@ -295,6 +363,7 @@ contract KipuBankV2 is ReentrancyGuard {
      * - The caller must have approved this contract to spend `amountUsdc`.
      * @param amountUsdc The amount of USDC to deposit (6 decimals).
      */
+    // >>> UNCHANGED LOGICALLY, BUT NOW CONSISTENT WITH USDC-CENTRIC MODEL.
     function depositWithUsdc(
         uint256 amountUsdc
     ) external nonReentrant onlyPositiveAmount(amountUsdc) {
@@ -321,9 +390,11 @@ contract KipuBankV2 is ReentrancyGuard {
      * @notice Withdraws an amount in USD, receiving ETH as output.
      * @dev
      * - `amountUsd` is denominated in USD with 18 decimals.
-     * - The amount of ETH to send is derived from the current ETH/USD price.
+     * - Internally, the user's USDC balance is decreased by `amountUsd / 1e12`.
+     * - USDC is swapped to native ETH via the Uniswap V4 router and sent to the user.
      * @param amountUsd The USD amount (18 decimals) the user wishes to withdraw.
      */
+    // >>> UPDATED: ETH withdrawals now use USDC as source and swap via Uniswap.
     function withdrawWithEth(
         uint256 amountUsd
     )
@@ -334,21 +405,33 @@ contract KipuBankV2 is ReentrancyGuard {
     {
         _commonWithdrawChecks(msg.sender, amountUsd);
 
+        // Enforce that the amount can be represented using 6-decimal USDC.
+        if (amountUsd % 1e12 != 0) revert InvalidUsdcAmount();
+        uint256 usdcAmount = amountUsd / 1e12;
+
         UserTokenBalances storage balances = _userTokenBalances[msg.sender];
 
-        uint256 ethPrice = PriceConverter.getPriceFeed(ethUsdPriceFeed);
-        uint256 ethAmountWei = (amountUsd * 1e18) / ethPrice;
+        if (balances.usdc < usdcAmount) revert InsufficientBalance();
 
-        if (balances.eth < ethAmountWei) revert InsufficientBalance();
-
-        balances.eth -= ethAmountWei;
+        balances.usdc -= usdcAmount;
         userBalanceUsd[msg.sender] -= amountUsd;
         totalBankBalanceUsd -= amountUsd;
 
         withdrawCount++;
 
-        (bool ok, ) = payable(msg.sender).call{value: ethAmountWei}("");
-        if (!ok) revert TransferFailed();
+        // Approve router to pull USDC from this contract.
+        bool okApprove = usdcToken.approve(address(uniswapRouter), usdcAmount);
+        if (!okApprove) revert TransferFailed();
+
+        // Swap USDC -> ETH and send directly to the user.
+        uint256 ethAmountOut = uniswapRouter.swapExactInputSingle(
+            address(usdcToken),
+            address(0), // native ETH represented as address(0) in this simplified interface
+            usdcAmount,
+            0, // amountOutMinimum set to 0 for simplicity (NOT for production)
+            msg.sender
+        );
+        if (ethAmountOut == 0) revert TransferFailed();
 
         emit SuccessfullyWithdrawn(msg.sender, amountUsd);
     }
@@ -357,9 +440,11 @@ contract KipuBankV2 is ReentrancyGuard {
      * @notice Withdraws an amount in USD, receiving BTC tokens as output.
      * @dev
      * - `amountUsd` is denominated in USD with 18 decimals.
-     * - The BTC token amount is derived from the current BTC/USD price.
+     * - Internally, user's USDC balance is decreased by `amountUsd / 1e12`.
+     * - USDC is swapped to BTC via the Uniswap V4 router and sent to the user.
      * @param amountUsd The USD amount (18 decimals) the user wishes to withdraw.
      */
+    // >>> UPDATED: BTC withdrawals now use USDC as source and swap via Uniswap.
     function withdrawWithBtc(
         uint256 amountUsd
     )
@@ -370,21 +455,33 @@ contract KipuBankV2 is ReentrancyGuard {
     {
         _commonWithdrawChecks(msg.sender, amountUsd);
 
+        // Enforce that the amount can be represented using 6-decimal USDC.
+        if (amountUsd % 1e12 != 0) revert InvalidUsdcAmount();
+        uint256 usdcAmount = amountUsd / 1e12;
+
         UserTokenBalances storage balances = _userTokenBalances[msg.sender];
 
-        uint256 btcPrice = PriceConverter.getPriceFeed(btcUsdPriceFeed);
-        uint256 btcAmount = (amountUsd * 1e18) / btcPrice;
+        if (balances.usdc < usdcAmount) revert InsufficientBalance();
 
-        if (balances.btc < btcAmount) revert InsufficientBalance();
-
-        balances.btc -= btcAmount;
+        balances.usdc -= usdcAmount;
         userBalanceUsd[msg.sender] -= amountUsd;
         totalBankBalanceUsd -= amountUsd;
 
         withdrawCount++;
 
-        bool ok = btcToken.transfer(msg.sender, btcAmount);
-        if (!ok) revert TransferFailed();
+        // Approve router to pull USDC from this contract.
+        bool okApprove = usdcToken.approve(address(uniswapRouter), usdcAmount);
+        if (!okApprove) revert TransferFailed();
+
+        // Swap USDC -> BTC and send directly to the user.
+        uint256 btcAmountOut = uniswapRouter.swapExactInputSingle(
+            address(usdcToken),
+            address(btcToken),
+            usdcAmount,
+            0, // amountOutMinimum set to 0 for simplicity (NOT for production)
+            msg.sender
+        );
+        if (btcAmountOut == 0) revert TransferFailed();
 
         emit SuccessfullyWithdrawn(msg.sender, amountUsd);
     }
@@ -396,6 +493,7 @@ contract KipuBankV2 is ReentrancyGuard {
      * - To map to USDC's 6 decimals, `amountUsd` must be divisible by 1e12.
      * @param amountUsd The USD amount (18 decimals) the user wishes to withdraw.
      */
+    // >>> UNCHANGED IN BEHAVIOR, BUT NOW EXPLICITLY PART OF USDC-CENTRIC MODEL.
     function withdrawWithUsdc(
         uint256 amountUsd
     )
@@ -469,6 +567,55 @@ contract KipuBankV2 is ReentrancyGuard {
     }
 
     // -------------------------------------------------------------------------
+    // Internal Swap Helpers (Uniswap V4)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @notice Internal helper that swaps an exact amount of a given token into USDC.
+     * @dev
+     * - If `tokenIn` is address(0), the function assumes native ETH is being swapped.
+     * - For ERC20 inputs, the token must already be held by this contract.
+     * - Uses a zero `amountOutMinimum` for simplicity; this is NOT appropriate
+     *   for production deployments where slippage must be controlled.
+     * @param tokenIn Address of the input token (or address(0) for native ETH).
+     * @param amountIn Exact amount of tokenIn to swap.
+     * @return usdcAmountOut Amount of USDC received from the swap.
+     */
+    // >>> NEW: Centralized swap helper to enforce consistent behavior.
+    function _swapExactInputSingleToUsdc(
+        address tokenIn,
+        uint256 amountIn
+    ) internal returns (uint256 usdcAmountOut) {
+        if (tokenIn == address(0)) {
+            // Native ETH path.
+            usdcAmountOut = uniswapRouter.swapExactInputSingle{value: amountIn}(
+                address(0),
+                address(usdcToken),
+                amountIn,
+                0, // amountOutMinimum set to 0 for simplicity (NOT for production)
+                address(this)
+            );
+        } else {
+            // ERC20 path. Approve router to spend the input tokens.
+            bool okApprove = IERC20(tokenIn).approve(
+                address(uniswapRouter),
+                amountIn
+            );
+            if (!okApprove) revert TransferFailed();
+
+            usdcAmountOut = uniswapRouter.swapExactInputSingle(
+                tokenIn,
+                address(usdcToken),
+                amountIn,
+                0, // amountOutMinimum set to 0 for simplicity (NOT for production)
+                address(this)
+            );
+        }
+
+        if (usdcAmountOut == 0) revert TransferFailed();
+    }
+
+    // -------------------------------------------------------------------------
     // Fallback Handlers
     // -------------------------------------------------------------------------
 
@@ -476,7 +623,7 @@ contract KipuBankV2 is ReentrancyGuard {
      * @notice Rejects direct ETH transfers to the contract.
      * @dev Users should use {depositWithEth} instead of sending ETH directly.
      */
-    receive() external payable {
+    function receive() external payable {
         revert InvalidDepositPath();
     }
 

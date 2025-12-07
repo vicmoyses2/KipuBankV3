@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {KipuBankV2} from "../src/KipuBankV2.sol";
+import {KipuBankV3} from "../src/KipuBankV3.sol";
 import {PriceConverter} from "../src/PriceConverter.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
@@ -127,16 +127,16 @@ contract MockUsdcToken is ERC20 {
 /**
  * @title ReentrancyAttacker
  * @notice Malicious contract used to test the ReentrancyGuard protection
- *         implemented in KipuBankV2.
+ *         implemented in KipuBankV3.
  * @dev
  * - Attempts to trigger a reentrant call during ETH withdrawal.
  * - The entire transaction should revert due to ReentrancyGuard.
  */
 contract ReentrancyAttacker {
-    KipuBankV2 public bank;
+    KipuBankV3 public bank;
     bool private _reenter;
 
-    constructor(KipuBankV2 bank_) {
+    constructor(KipuBankV3 bank_) {
         bank = bank_;
     }
 
@@ -174,14 +174,14 @@ contract ReentrancyAttacker {
 }
 
 /**
- * @title KipuBankV2Test
- * @notice Test suite for the KipuBankV2 contract using mocked price feeds and tokens.
+ * @title KipuBankV3Test
+ * @notice Test suite for the KipuBankV3 contract using mocked price feeds and tokens.
  * @dev Uses Foundry's Test base contract and cheatcodes (via vm).
  */
-contract KipuBankV2Test is Test {
+contract KipuBankV3Test is Test {
     using PriceConverter for uint256;
 
-    KipuBankV2 public kipu;
+    KipuBankV3 public kipu;
     MockV3Aggregator public ethFeed;
     MockV3Aggregator public btcFeed;
     MockBtcToken public btcToken;
@@ -199,7 +199,7 @@ contract KipuBankV2Test is Test {
     /**
      * @notice Sets up the test environment:
      *  - Deploys mock price feeds and tokens.
-     *  - Deploys KipuBankV2 pointing to the mocks.
+     *  - Deploys KipuBankV3 pointing to the mocks.
      *  - Allocates initial ETH, BTC, and USDC balances to test users.
      */
     function setUp() external {
@@ -212,7 +212,7 @@ contract KipuBankV2Test is Test {
         uint256 bankCapacityUsd = 1_000_000e18;
         uint256 maxWithdrawPerTxUsd = 10_000e18;
 
-        kipu = new KipuBankV2(
+        kipu = new KipuBankV3(
             bankCapacityUsd,
             maxWithdrawPerTxUsd,
             address(ethFeed),
@@ -373,7 +373,7 @@ contract KipuBankV2Test is Test {
         uint256 tooHighUsd = kipu.i_maxWithdrawPerTxUsd() + 1;
 
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidMaxWithdrawAmount.selector);
+        vm.expectRevert(KipuBankV3.InvalidMaxWithdrawAmount.selector);
         kipu.withdrawWithEth(tooHighUsd);
     }
 
@@ -384,7 +384,7 @@ contract KipuBankV2Test is Test {
         uint256 smallCapacityUsd = 1_000e18;
         uint256 maxWithdrawPerTxUsd = 10_000e18;
 
-        kipu = new KipuBankV2(
+        kipu = new KipuBankV3(
             smallCapacityUsd,
             maxWithdrawPerTxUsd,
             address(ethFeed),
@@ -396,7 +396,7 @@ contract KipuBankV2Test is Test {
         vm.deal(user, 10 ether);
 
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.ExceedsBankCapacity.selector);
+        vm.expectRevert(KipuBankV3.ExceedsBankCapacity.selector);
         kipu.depositWithEth{value: 1 ether}();
     }
 
@@ -413,7 +413,7 @@ contract KipuBankV2Test is Test {
 
         uint256 badAmountUsd = 500e18 + 1;
 
-        vm.expectRevert(KipuBankV2.InvalidUsdcAmount.selector);
+        vm.expectRevert(KipuBankV3.InvalidUsdcAmount.selector);
         kipu.withdrawWithUsdc(badAmountUsd);
         vm.stopPrank();
     }
@@ -453,17 +453,17 @@ contract KipuBankV2Test is Test {
     function testDepositZeroAmountReverts() external {
         // ETH deposit with zero value
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidAmount.selector);
+        vm.expectRevert(KipuBankV3.InvalidAmount.selector);
         kipu.depositWithEth{value: 0}();
 
         // BTC deposit with zero amount
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidAmount.selector);
+        vm.expectRevert(KipuBankV3.InvalidAmount.selector);
         kipu.depositWithBtc(0);
 
         // USDC deposit with zero amount
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidAmount.selector);
+        vm.expectRevert(KipuBankV3.InvalidAmount.selector);
         kipu.depositWithUsdc(0);
     }
 
@@ -474,15 +474,15 @@ contract KipuBankV2Test is Test {
      */
     function testWithdrawFromNonExistingUserReverts() external {
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InsufficientBalance.selector);
+        vm.expectRevert(KipuBankV3.InsufficientBalance.selector);
         kipu.withdrawWithEth(1e18);
 
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InsufficientBalance.selector);
+        vm.expectRevert(KipuBankV3.InsufficientBalance.selector);
         kipu.withdrawWithBtc(1e18);
 
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InsufficientBalance.selector);
+        vm.expectRevert(KipuBankV3.InsufficientBalance.selector);
         kipu.withdrawWithUsdc(1e18);
     }
 
@@ -528,7 +528,7 @@ contract KipuBankV2Test is Test {
         vm.deal(user, 10 ether);
 
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidDepositPath.selector);
+        vm.expectRevert(KipuBankV3.InvalidDepositPath.selector);
         // Empty calldata triggers receive(), expectRevert cuida da falha
         address(kipu).call{value: 1 ether}("");
     }
@@ -538,7 +538,7 @@ contract KipuBankV2Test is Test {
      */
     function testFallbackFunctionRevertsOnUnknownCall() external {
         vm.prank(user);
-        vm.expectRevert(KipuBankV2.InvalidDepositPath.selector);
+        vm.expectRevert(KipuBankV3.InvalidDepositPath.selector);
         // Non-matching function signature triggers fallback()
         address(kipu).call(abi.encodeWithSignature("nonExistingFunction()"));
     }
